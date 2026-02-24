@@ -27,9 +27,17 @@ ENV HTTP_PORT=8080
 
 EXPOSE 8080 9090
 
+#ENTRYPOINT ["java", \
+#  "-XX:+UseG1GC", \
+#  "-XX:MaxGCPauseMillis=50", \
+#  "-XX:+HeapDumpOnOutOfMemoryError", \
+#  "-Xms128m", "-Xmx512m", \
+#  "-jar", "app.jar"]
+
 ENTRYPOINT ["java", \
-  "-XX:+UseG1GC", \
-  "-XX:MaxGCPauseMillis=50", \
-  "-XX:+HeapDumpOnOutOfMemoryError", \
-  "-Xms128m", "-Xmx512m", \
+  "-XX:+UseSerialGC", \
+  "-XX:MaxRAM=400m", \
+  "-Xms64m", "-Xmx350m", \
+  "-XX:+UseCompressedOops", \
+  "-Dspring.jmx.enabled=false", \
   "-jar", "app.jar"]
