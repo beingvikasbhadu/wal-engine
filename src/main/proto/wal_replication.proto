@@ -1,0 +1,80 @@
+syntax = "proto3";
+
+package walengine;
+
+option java_multiple_files = true;
+option java_package = "com.walengine.replication.proto";
+option java_outer_classname = "WALReplicationProto";
+
+// ─── Message Types ────────────────────────────────────────────────────────────
+
+// A single WAL entry transmitted over the wire
+message WALEntryProto {
+  int64  lsn         = 1;  // Log Sequence Number
+  int64  term        = 2;  // Replication term (stale-leader detection)
+  int32  entry_type  = 3;  // 1=DATA 2=COMMIT 3=ROLLBACK 4=CHECKPOINT 5=NOOP
+  bytes  payload     = 4;  // Application data
+  int64  checksum    = 5;  // CRC32 checksum (verified on replica side)
+  int64  timestamp   = 6;  // Wall clock when entry was written on primary
+}
+
+// Replica introduces itself and declares its current LSN
+message HandshakeRequest {
+  string replica_id   = 1;  // Unique ID for this replica node
+  int64  current_lsn  = 2;  // Last LSN this replica has applied
+  string replica_host = 3;  // Host:port for reverse health-check
+}
+
+message HandshakeResponse {
+  bool   accepted       = 1;
+  int64  primary_lsn    = 2;  // Current LSN on primary
+  int64  catch_up_from  = 3;  // First LSN primary will stream from
+  string message        = 4;
+}
+
+// Replica sends periodic acknowledgements back to primary
+message AckRequest {
+  string replica_id     = 1;
+  int64  applied_lsn    = 2;  // Last LSN this replica has durably applied
+}
+
+message AckResponse {
+  bool   accepted = 1;
+}
+
+// Primary → Replica: stream of WAL entries
+message ReplicationStream {
+  WALEntryProto entry       = 1;
+  int64         primary_lsn = 2;  // Current primaryLsn (used to compute lag)
+}
+
+// Health check for replica status
+message ReplicaStatusRequest {
+  string replica_id = 1;
+}
+
+message ReplicaStatusResponse {
+  string replica_id   = 1;
+  int64  applied_lsn  = 2;
+  int64  lag          = 3;  // primaryLsn - appliedLsn
+  bool   healthy      = 4;
+  string state        = 5;  // HANDSHAKING | CATCHING_UP | STREAMING | FAILED
+}
+
+// ─── Service Definition ───────────────────────────────────────────────────────
+
+service WALReplicationService {
+
+  // Step 1: Replica connects and performs handshake
+  rpc Handshake (HandshakeRequest) returns (HandshakeResponse);
+
+  // Step 2: Primary streams WAL entries to replica (server-side streaming)
+  // Replica keeps this stream open indefinitely to receive real-time entries
+  rpc StreamEntries (HandshakeRequest) returns (stream ReplicationStream);
+
+  // Step 3: Replica sends periodic acknowledgements (replica → primary)
+  rpc Acknowledge (AckRequest) returns (AckResponse);
+
+  // Status check — used by monitoring
+  rpc GetReplicaStatus (ReplicaStatusRequest) returns (ReplicaStatusResponse);
+}

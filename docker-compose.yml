@@ -1,0 +1,93 @@
+services:
+
+  # ─── PRIMARY NODE ─────────────────────────────────────────────────────────
+  wal-primary:
+    build: .
+    container_name: wal-primary
+    hostname: wal-primary
+    ports:
+      - "8080:8080"
+      - "9092:9090"
+    environment:
+      WAL_DIR: /data/wal
+      WAL_ROLE: PRIMARY
+      WAL_SEGMENT_SIZE_MB: 64
+      WAL_GRPC_PORT: 9090
+      WAL_COMPACTION_ENABLED: "true"
+      HTTP_PORT: 8080
+    volumes:
+      - wal-primary-data:/data/wal
+    networks:
+      wal-net:
+        aliases:
+          - wal-primary
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q --spider http://localhost:8080/actuator/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+  # ─── REPLICA NODE ─────────────────────────────────────────────────────────
+  wal-replica:
+    build: .
+    container_name: wal-replica
+    hostname: wal-replica
+    ports:
+      - "8081:8080"
+    environment:
+      WAL_DIR: /data/wal
+      WAL_ROLE: REPLICA
+      WAL_SEGMENT_SIZE_MB: 64
+      WAL_PRIMARY_HOST: wal-primary
+      WAL_PRIMARY_GRPC_PORT: 9090
+      WAL_REPLICA_ID: replica-1
+      WAL_COMPACTION_ENABLED: "false"
+      HTTP_PORT: 8080
+    volumes:
+      - wal-replica-data:/data/wal
+    networks:
+      wal-net:
+        aliases:
+          - wal-replica
+    depends_on:
+      wal-primary:
+        condition: service_healthy
+
+  # ─── PROMETHEUS ───────────────────────────────────────────────────────────
+  prometheus:
+    image: prom/prometheus:v2.48.0
+    container_name: wal-prometheus
+    ports:
+      - "9999:9090"
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    networks:
+      - wal-net
+    depends_on:
+      - wal-primary
+
+  # ─── GRAFANA ──────────────────────────────────────────────────────────────
+  grafana:
+    image: grafana/grafana:10.2.0
+    container_name: wal-grafana
+    ports:
+      - "3000:3000"
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: admin
+      GF_USERS_ALLOW_SIGN_UP: "false"
+    volumes:
+      - grafana-data:/var/lib/grafana
+    networks:
+      - wal-net
+    depends_on:
+      - prometheus
+
+volumes:
+  wal-primary-data:
+  wal-replica-data:
+  grafana-data:
+
+networks:
+  wal-net:
+    driver: bridge

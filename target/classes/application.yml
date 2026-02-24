@@ -1,0 +1,40 @@
+spring:
+  application:
+    name: wal-engine
+
+server:
+  port: ${HTTP_PORT:8080}
+
+wal:
+  directory: ${WAL_DIR:/tmp/wal-data}
+  segment:
+    size-mb: ${WAL_SEGMENT_SIZE_MB:64}
+  role: ${WAL_ROLE:PRIMARY}
+  grpc:
+    port: ${WAL_GRPC_PORT:9090}
+  primary:
+    host: ${WAL_PRIMARY_HOST:localhost}
+    grpc-port: ${WAL_PRIMARY_GRPC_PORT:9090}
+  replica:
+    id: ${WAL_REPLICA_ID:replica-1}
+  compaction:
+    enabled: ${WAL_COMPACTION_ENABLED:true}
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,prometheus,metrics
+  endpoint:
+    health:
+      show-details: always
+  metrics:
+    export:
+      prometheus:
+        enabled: true
+
+logging:
+  level:
+    com.walengine: DEBUG
+    io.grpc: INFO
+    root: INFO

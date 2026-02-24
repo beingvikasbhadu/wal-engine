@@ -1,0 +1,1418 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>WAL Engine — Control Plane</title>
+<link href="https://fonts.googleapis.com/css2?family=Share+Tech+Mono&family=Orbitron:wght@400;700;900&family=Space+Mono:wght@400;700&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --bg:        #030609;
+    --bg2:       #080d12;
+    --bg3:       #0d1520;
+    --green:     #00ff88;
+    --green-dim: #00cc6a;
+    --amber:     #ffb300;
+    --red:       #ff3d5a;
+    --blue:      #00c8ff;
+    --border:    #0f2a1e;
+    --border2:   #1a3a2a;
+    --text:      #a0c4a8;
+    --text-dim:  #3d6b4f;
+    --glow:      0 0 20px rgba(0,255,136,0.15), 0 0 60px rgba(0,255,136,0.05);
+    --glow-strong: 0 0 30px rgba(0,255,136,0.4);
+  }
+
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: 'Share Tech Mono', monospace;
+    min-height: 100vh;
+    overflow-x: hidden;
+    cursor: crosshair;
+  }
+
+  /* Scanline effect */
+  body::before {
+    content: '';
+    position: fixed;
+    inset: 0;
+    background: repeating-linear-gradient(
+      0deg,
+      transparent,
+      transparent 2px,
+      rgba(0,0,0,0.08) 2px,
+      rgba(0,0,0,0.08) 4px
+    );
+    pointer-events: none;
+    z-index: 9999;
+  }
+
+  /* Grid background */
+  body::after {
+    content: '';
+    position: fixed;
+    inset: 0;
+    background-image:
+      linear-gradient(rgba(0,255,136,0.03) 1px, transparent 1px),
+      linear-gradient(90deg, rgba(0,255,136,0.03) 1px, transparent 1px);
+    background-size: 40px 40px;
+    pointer-events: none;
+    z-index: 0;
+  }
+
+  /* ── HEADER ─────────────────────────────────────────────── */
+  header {
+    position: relative;
+    z-index: 10;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 16px 32px;
+    border-bottom: 1px solid var(--border2);
+    background: linear-gradient(180deg, rgba(0,255,136,0.04) 0%, transparent 100%);
+  }
+
+  .logo {
+    display: flex;
+    align-items: center;
+    gap: 16px;
+  }
+
+  .logo-icon {
+    width: 40px;
+    height: 40px;
+    border: 2px solid var(--green);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    box-shadow: var(--glow-strong);
+    animation: pulse-border 2s ease-in-out infinite;
+  }
+
+  @keyframes pulse-border {
+    0%, 100% { box-shadow: 0 0 10px rgba(0,255,136,0.4); }
+    50% { box-shadow: 0 0 30px rgba(0,255,136,0.8), 0 0 60px rgba(0,255,136,0.3); }
+  }
+
+  .logo-icon svg { width: 22px; height: 22px; fill: var(--green); }
+
+  .logo-text {
+    font-family: 'Orbitron', monospace;
+    font-weight: 900;
+    font-size: 18px;
+    color: var(--green);
+    letter-spacing: 4px;
+    text-shadow: 0 0 20px rgba(0,255,136,0.5);
+  }
+
+  .logo-sub {
+    font-size: 10px;
+    color: var(--text-dim);
+    letter-spacing: 3px;
+    margin-top: 2px;
+  }
+
+  .header-right {
+    display: flex;
+    align-items: center;
+    gap: 24px;
+  }
+
+  .system-time {
+    font-family: 'Orbitron', monospace;
+    font-size: 13px;
+    color: var(--green-dim);
+    letter-spacing: 2px;
+  }
+
+  .connection-status {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 11px;
+    letter-spacing: 2px;
+  }
+
+  .dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: var(--green);
+    box-shadow: 0 0 10px var(--green);
+    animation: blink 1.5s ease-in-out infinite;
+  }
+
+  .dot.red { background: var(--red); box-shadow: 0 0 10px var(--red); }
+  .dot.amber { background: var(--amber); box-shadow: 0 0 10px var(--amber); animation: blink 0.8s ease-in-out infinite; }
+
+  @keyframes blink {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.3; }
+  }
+
+  /* ── LAYOUT ─────────────────────────────────────────────── */
+  .layout {
+    position: relative;
+    z-index: 10;
+    display: grid;
+    grid-template-columns: 280px 1fr 320px;
+    grid-template-rows: auto 1fr auto;
+    gap: 0;
+    height: calc(100vh - 73px);
+  }
+
+  /* ── SIDEBAR LEFT ───────────────────────────────────────── */
+  .sidebar-left {
+    border-right: 1px solid var(--border2);
+    padding: 24px 20px;
+    display: flex;
+    flex-direction: column;
+    gap: 20px;
+    overflow-y: auto;
+  }
+
+  .panel-label {
+    font-size: 9px;
+    letter-spacing: 4px;
+    color: var(--text-dim);
+    text-transform: uppercase;
+    margin-bottom: 12px;
+    padding-bottom: 8px;
+    border-bottom: 1px solid var(--border);
+  }
+
+  /* ── METRIC CARD ────────────────────────────────────────── */
+  .metric-card {
+    border: 1px solid var(--border2);
+    padding: 16px;
+    background: var(--bg2);
+    position: relative;
+    overflow: hidden;
+    transition: border-color 0.3s;
+  }
+
+  .metric-card::before {
+    content: '';
+    position: absolute;
+    top: 0; left: 0;
+    width: 3px;
+    height: 100%;
+    background: var(--green);
+    box-shadow: 0 0 10px var(--green);
+  }
+
+  .metric-card:hover { border-color: var(--green-dim); }
+
+  .metric-label {
+    font-size: 9px;
+    letter-spacing: 3px;
+    color: var(--text-dim);
+    margin-bottom: 8px;
+  }
+
+  .metric-value {
+    font-family: 'Orbitron', monospace;
+    font-size: 22px;
+    font-weight: 700;
+    color: var(--green);
+    text-shadow: 0 0 20px rgba(0,255,136,0.4);
+    line-height: 1;
+  }
+
+  .metric-value.amber { color: var(--amber); text-shadow: 0 0 20px rgba(255,179,0,0.4); }
+  .metric-value.red   { color: var(--red);   text-shadow: 0 0 20px rgba(255,61,90,0.4); }
+  .metric-value.blue  { color: var(--blue);  text-shadow: 0 0 20px rgba(0,200,255,0.4); }
+
+  .metric-sub {
+    font-size: 10px;
+    color: var(--text-dim);
+    margin-top: 4px;
+  }
+
+  /* ── MINI CHART ─────────────────────────────────────────── */
+  .mini-chart {
+    height: 40px;
+    margin-top: 8px;
+    position: relative;
+  }
+
+  .mini-chart canvas { width: 100% !important; height: 40px !important; }
+
+  /* ── NODE STATUS ────────────────────────────────────────── */
+  .node-card {
+    border: 1px solid var(--border2);
+    padding: 14px;
+    background: var(--bg2);
+    position: relative;
+  }
+
+  .node-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 10px;
+  }
+
+  .node-name {
+    font-family: 'Orbitron', monospace;
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: 2px;
+  }
+
+  .node-role {
+    font-size: 9px;
+    letter-spacing: 2px;
+    padding: 2px 8px;
+    border: 1px solid currentColor;
+  }
+
+  .node-role.primary { color: var(--green); border-color: var(--green); }
+  .node-role.replica { color: var(--blue);  border-color: var(--blue); }
+
+  .node-stats { display: flex; flex-direction: column; gap: 6px; }
+
+  .node-stat {
+    display: flex;
+    justify-content: space-between;
+    font-size: 10px;
+  }
+
+  .node-stat-label { color: var(--text-dim); }
+  .node-stat-value { color: var(--text); font-family: 'Space Mono', monospace; }
+
+  /* lag bar */
+  .lag-bar {
+    height: 3px;
+    background: var(--border);
+    margin-top: 10px;
+    position: relative;
+    overflow: hidden;
+  }
+
+  .lag-fill {
+    height: 100%;
+    background: var(--green);
+    box-shadow: 0 0 8px var(--green);
+    transition: width 0.5s ease;
+  }
+
+  /* ── MAIN AREA ──────────────────────────────────────────── */
+  .main {
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+  }
+
+  /* ── WRITE CONSOLE ──────────────────────────────────────── */
+  .write-console {
+    border-bottom: 1px solid var(--border2);
+    padding: 20px 24px;
+    background: var(--bg2);
+  }
+
+  .console-header {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    margin-bottom: 14px;
+  }
+
+  .console-title {
+    font-family: 'Orbitron', monospace;
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: 3px;
+    color: var(--green);
+  }
+
+  .console-input-row {
+    display: flex;
+    gap: 10px;
+    align-items: stretch;
+  }
+
+  .console-prefix {
+    color: var(--green);
+    font-size: 14px;
+    line-height: 44px;
+    white-space: nowrap;
+  }
+
+  .console-input {
+    flex: 1;
+    background: var(--bg3);
+    border: 1px solid var(--border2);
+    color: var(--green);
+    font-family: 'Share Tech Mono', monospace;
+    font-size: 13px;
+    padding: 12px 16px;
+    outline: none;
+    transition: border-color 0.2s, box-shadow 0.2s;
+    letter-spacing: 1px;
+  }
+
+  .console-input:focus {
+    border-color: var(--green);
+    box-shadow: 0 0 20px rgba(0,255,136,0.1), inset 0 0 20px rgba(0,255,136,0.03);
+  }
+
+  .console-input::placeholder { color: var(--text-dim); }
+
+  .btn {
+    font-family: 'Orbitron', monospace;
+    font-size: 10px;
+    font-weight: 700;
+    letter-spacing: 2px;
+    padding: 12px 20px;
+    border: 1px solid currentColor;
+    background: transparent;
+    cursor: pointer;
+    transition: all 0.2s;
+    white-space: nowrap;
+  }
+
+  .btn-green {
+    color: var(--green);
+    border-color: var(--green);
+  }
+  .btn-green:hover {
+    background: var(--green);
+    color: var(--bg);
+    box-shadow: var(--glow-strong);
+  }
+
+  .btn-amber {
+    color: var(--amber);
+    border-color: var(--amber);
+  }
+  .btn-amber:hover {
+    background: var(--amber);
+    color: var(--bg);
+    box-shadow: 0 0 20px rgba(255,179,0,0.4);
+  }
+
+  .btn-red {
+    color: var(--red);
+    border-color: var(--red);
+  }
+  .btn-red:hover {
+    background: var(--red);
+    color: white;
+    box-shadow: 0 0 20px rgba(255,61,90,0.4);
+  }
+
+  .btn-blue {
+    color: var(--blue);
+    border-color: var(--blue);
+  }
+  .btn-blue:hover {
+    background: var(--blue);
+    color: var(--bg);
+    box-shadow: 0 0 20px rgba(0,200,255,0.4);
+  }
+
+  .btn:active { transform: scale(0.97); }
+
+  .action-row {
+    display: flex;
+    gap: 8px;
+    margin-top: 10px;
+  }
+
+  /* ── LSN TAPE ───────────────────────────────────────────── */
+  .lsn-tape {
+    border-bottom: 1px solid var(--border2);
+    padding: 10px 24px;
+    display: flex;
+    align-items: center;
+    gap: 16px;
+    background: var(--bg);
+    overflow: hidden;
+  }
+
+  .lsn-label {
+    font-size: 9px;
+    letter-spacing: 3px;
+    color: var(--text-dim);
+    white-space: nowrap;
+  }
+
+  .lsn-track {
+    flex: 1;
+    height: 28px;
+    position: relative;
+    overflow: hidden;
+  }
+
+  .lsn-entries {
+    display: flex;
+    gap: 4px;
+    position: absolute;
+    right: 0;
+    top: 0;
+    height: 100%;
+    align-items: center;
+    transition: transform 0.3s ease;
+  }
+
+  .lsn-chip {
+    font-family: 'Space Mono', monospace;
+    font-size: 9px;
+    padding: 4px 8px;
+    border: 1px solid var(--border2);
+    background: var(--bg3);
+    color: var(--text-dim);
+    white-space: nowrap;
+    animation: chip-in 0.3s ease;
+  }
+
+  .lsn-chip.new {
+    border-color: var(--green);
+    color: var(--green);
+    box-shadow: 0 0 8px rgba(0,255,136,0.3);
+  }
+
+  @keyframes chip-in {
+    from { opacity: 0; transform: translateX(20px); }
+    to   { opacity: 1; transform: translateX(0); }
+  }
+
+  /* ── LOG STREAM ─────────────────────────────────────────── */
+  .log-stream {
+    flex: 1;
+    overflow-y: auto;
+    padding: 16px 24px;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+  }
+
+  .log-stream::-webkit-scrollbar { width: 4px; }
+  .log-stream::-webkit-scrollbar-track { background: var(--bg); }
+  .log-stream::-webkit-scrollbar-thumb { background: var(--border2); }
+
+  .log-entry {
+    display: grid;
+    grid-template-columns: 140px 70px 80px 1fr 80px;
+    gap: 12px;
+    align-items: center;
+    padding: 8px 12px;
+    border-left: 2px solid transparent;
+    font-size: 11px;
+    transition: all 0.2s;
+    animation: entry-in 0.3s ease;
+  }
+
+  @keyframes entry-in {
+    from { opacity: 0; transform: translateX(-10px); background: rgba(0,255,136,0.1); }
+    to   { opacity: 1; transform: translateX(0);     background: transparent; }
+  }
+
+  .log-entry:hover {
+    background: var(--bg2);
+    border-left-color: var(--green-dim);
+  }
+
+  .log-entry.DATA    { border-left-color: transparent; }
+  .log-entry.COMMIT  { border-left-color: var(--green); }
+  .log-entry.ROLLBACK { border-left-color: var(--red); }
+  .log-entry.CHECKPOINT { border-left-color: var(--amber); }
+
+  .log-lsn  { font-family: 'Space Mono', monospace; color: var(--text-dim); font-size: 10px; }
+  .log-type { font-size: 9px; letter-spacing: 1px; padding: 2px 6px; border: 1px solid; text-align: center; }
+  .log-type.DATA       { color: var(--blue);  border-color: var(--blue); }
+  .log-type.COMMIT     { color: var(--green); border-color: var(--green); }
+  .log-type.ROLLBACK   { color: var(--red);   border-color: var(--red); }
+  .log-type.CHECKPOINT { color: var(--amber); border-color: var(--amber); }
+
+  .log-term    { color: var(--text-dim); font-size: 10px; }
+  .log-payload { color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .log-size    { color: var(--text-dim); font-size: 10px; text-align: right; }
+
+  .log-header {
+    display: grid;
+    grid-template-columns: 140px 70px 80px 1fr 80px;
+    gap: 12px;
+    padding: 6px 12px;
+    font-size: 9px;
+    letter-spacing: 2px;
+    color: var(--text-dim);
+    border-bottom: 1px solid var(--border);
+    margin-bottom: 4px;
+  }
+
+  /* ── SIDEBAR RIGHT ──────────────────────────────────────── */
+  .sidebar-right {
+    border-left: 1px solid var(--border2);
+    padding: 24px 20px;
+    display: flex;
+    flex-direction: column;
+    gap: 20px;
+    overflow-y: auto;
+  }
+
+  /* ── SEGMENT VISUALIZER ─────────────────────────────────── */
+  .segment-viz {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+
+  .segment-bar {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    font-size: 10px;
+  }
+
+  .segment-name {
+    color: var(--text-dim);
+    font-size: 9px;
+    width: 80px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .segment-track {
+    flex: 1;
+    height: 12px;
+    background: var(--border);
+    position: relative;
+    overflow: hidden;
+  }
+
+  .segment-fill {
+    height: 100%;
+    background: linear-gradient(90deg, var(--green-dim), var(--green));
+    box-shadow: 0 0 6px var(--green);
+    transition: width 0.5s ease;
+    position: relative;
+  }
+
+  .segment-fill.active {
+    animation: segment-pulse 2s ease-in-out infinite;
+  }
+
+  @keyframes segment-pulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.7; }
+  }
+
+  .segment-pct {
+    color: var(--text-dim);
+    font-size: 9px;
+    width: 30px;
+    text-align: right;
+  }
+
+  /* ── THROUGHPUT CHART ───────────────────────────────────── */
+  .chart-container {
+    height: 100px;
+    position: relative;
+  }
+
+  .chart-container canvas {
+    width: 100% !important;
+    height: 100px !important;
+  }
+
+  /* ── REPLICATION STREAM ─────────────────────────────────── */
+  .replication-stream {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    max-height: 150px;
+    overflow-y: auto;
+  }
+
+  .rep-event {
+    font-size: 10px;
+    padding: 4px 8px;
+    border-left: 2px solid var(--green-dim);
+    color: var(--text-dim);
+    animation: entry-in 0.3s ease;
+  }
+
+  .rep-event span { color: var(--green); }
+
+  /* ── BOTTOM STATUS BAR ──────────────────────────────────── */
+  .status-bar {
+    grid-column: 1 / -1;
+    border-top: 1px solid var(--border2);
+    padding: 8px 24px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    font-size: 10px;
+    color: var(--text-dim);
+    letter-spacing: 1px;
+    background: var(--bg2);
+  }
+
+  .status-items { display: flex; gap: 24px; align-items: center; }
+  .status-item  { display: flex; gap: 6px; }
+  .status-item .val { color: var(--green); }
+
+  /* ── TOAST ──────────────────────────────────────────────── */
+  .toast-container {
+    position: fixed;
+    top: 80px;
+    right: 24px;
+    z-index: 1000;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+
+  .toast {
+    padding: 12px 20px;
+    border: 1px solid var(--green);
+    background: var(--bg2);
+    font-size: 11px;
+    letter-spacing: 1px;
+    box-shadow: var(--glow);
+    animation: toast-in 0.3s ease, toast-out 0.3s ease 2.7s forwards;
+    min-width: 280px;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+  }
+
+  .toast.error { border-color: var(--red); box-shadow: 0 0 20px rgba(255,61,90,0.2); }
+  .toast.warn  { border-color: var(--amber); }
+  .toast-lsn   { color: var(--green); font-family: 'Space Mono', monospace; font-size: 10px; }
+  .toast.error .toast-lsn { color: var(--red); }
+
+  @keyframes toast-in  { from { opacity: 0; transform: translateX(20px); } to { opacity: 1; transform: translateX(0); } }
+  @keyframes toast-out { from { opacity: 1; } to { opacity: 0; pointer-events: none; } }
+
+  /* ── LOADING OVERLAY ────────────────────────────────────── */
+  .loading {
+    position: fixed;
+    inset: 0;
+    background: var(--bg);
+    z-index: 9998;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 24px;
+    transition: opacity 0.5s ease;
+  }
+
+  .loading.hidden { opacity: 0; pointer-events: none; }
+
+  .loading-logo {
+    font-family: 'Orbitron', monospace;
+    font-size: 32px;
+    font-weight: 900;
+    color: var(--green);
+    text-shadow: 0 0 40px rgba(0,255,136,0.6);
+    letter-spacing: 8px;
+    animation: flicker 0.1s infinite;
+  }
+
+  @keyframes flicker {
+    0%, 98% { opacity: 1; }
+    99% { opacity: 0.8; }
+    100% { opacity: 1; }
+  }
+
+  .loading-bar {
+    width: 300px;
+    height: 2px;
+    background: var(--border);
+    overflow: hidden;
+  }
+
+  .loading-fill {
+    height: 100%;
+    background: var(--green);
+    box-shadow: 0 0 10px var(--green);
+    animation: load-fill 1.5s ease forwards;
+  }
+
+  @keyframes load-fill { from { width: 0; } to { width: 100%; } }
+
+  .loading-text {
+    font-size: 11px;
+    color: var(--text-dim);
+    letter-spacing: 4px;
+    animation: text-cycle 1.5s steps(1) infinite;
+  }
+
+  @keyframes text-cycle {
+    0%  { content: 'INITIALIZING SYSTEMS'; }
+    33% { opacity: 0.5; }
+    66% { opacity: 1; }
+  }
+
+  /* ── EMPTY STATE ────────────────────────────────────────── */
+  .empty-state {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 12px;
+    color: var(--text-dim);
+  }
+
+  .empty-state svg { opacity: 0.3; }
+  .empty-state p   { font-size: 11px; letter-spacing: 2px; }
+
+  /* ── FSYNC INDICATOR ────────────────────────────────────── */
+  .fsync-flash {
+    position: fixed;
+    top: 0; left: 0; right: 0;
+    height: 2px;
+    background: var(--green);
+    box-shadow: 0 0 10px var(--green);
+    z-index: 9997;
+    animation: fsync-anim 0.4s ease forwards;
+  }
+
+  @keyframes fsync-anim {
+    0%   { opacity: 1; transform: scaleX(0); transform-origin: left; }
+    50%  { opacity: 1; transform: scaleX(1); }
+    100% { opacity: 0; transform: scaleX(1); }
+  }
+
+  /* scrollbar */
+  .sidebar-left::-webkit-scrollbar,
+  .sidebar-right::-webkit-scrollbar { width: 3px; }
+  .sidebar-left::-webkit-scrollbar-thumb,
+  .sidebar-right::-webkit-scrollbar-thumb { background: var(--border2); }
+</style>
+</head>
+<body>
+
+<!-- Loading Screen -->
+<div class="loading" id="loading">
+  <div class="loading-logo">WAL ENGINE</div>
+  <div class="loading-bar"><div class="loading-fill"></div></div>
+  <div class="loading-text">ESTABLISHING CONNECTION...</div>
+</div>
+
+<!-- Header -->
+<header>
+  <div class="logo">
+    <div class="logo-icon">
+      <svg viewBox="0 0 24 24"><path d="M4 4h16v2H4zm0 4h16v2H4zm0 4h10v2H4zm0 4h10v2H4zm12 0l4-4v8l-4-4z"/></svg>
+    </div>
+    <div>
+      <div class="logo-text">WAL ENGINE</div>
+      <div class="logo-sub">DISTRIBUTED WRITE-AHEAD LOG · CONTROL PLANE</div>
+    </div>
+  </div>
+  <div class="header-right">
+    <div class="system-time" id="clock">00:00:00</div>
+    <div class="connection-status">
+      <div class="dot" id="conn-dot"></div>
+      <span id="conn-label">CONNECTED</span>
+    </div>
+  </div>
+</header>
+
+<!-- Main Layout -->
+<div class="layout">
+
+  <!-- LEFT SIDEBAR -->
+  <div class="sidebar-left">
+    <div>
+      <div class="panel-label">engine metrics</div>
+
+      <div style="display:flex;flex-direction:column;gap:10px">
+        <div class="metric-card">
+          <div class="metric-label">CURRENT LSN</div>
+          <div class="metric-value" id="metric-lsn">—</div>
+          <div class="metric-sub">log sequence number</div>
+        </div>
+
+        <div class="metric-card">
+          <div class="metric-label">TOTAL ENTRIES</div>
+          <div class="metric-value blue" id="metric-entries">0</div>
+          <div class="metric-sub">committed to disk</div>
+        </div>
+
+        <div class="metric-card">
+          <div class="metric-label">ACTIVE SEGMENT</div>
+          <div class="metric-value amber" id="metric-seg-size">0 B</div>
+          <div class="metric-sub" id="metric-seg-count">0 segments total</div>
+        </div>
+
+        <div class="metric-card">
+          <div class="metric-label">WRITE THROUGHPUT</div>
+          <div class="metric-value" id="metric-throughput">0</div>
+          <div class="metric-sub">entries / second</div>
+          <div class="mini-chart"><canvas id="throughput-mini"></canvas></div>
+        </div>
+      </div>
+    </div>
+
+    <div>
+      <div class="panel-label">node topology</div>
+      <div style="display:flex;flex-direction:column;gap:8px">
+
+        <div class="node-card">
+          <div class="node-header">
+            <div class="node-name" style="color:var(--green)">PRIMARY</div>
+            <div class="node-role primary">LEADER</div>
+          </div>
+          <div class="node-stats">
+            <div class="node-stat">
+              <span class="node-stat-label">HOST</span>
+              <span class="node-stat-value">localhost:8080</span>
+            </div>
+            <div class="node-stat">
+              <span class="node-stat-label">gRPC</span>
+              <span class="node-stat-value">:9092</span>
+            </div>
+            <div class="node-stat">
+              <span class="node-stat-label">STATUS</span>
+              <span class="node-stat-value" id="primary-status" style="color:var(--green)">HEALTHY</span>
+            </div>
+          </div>
+        </div>
+
+        <div class="node-card">
+          <div class="node-header">
+            <div class="node-name" style="color:var(--blue)">REPLICA-1</div>
+            <div class="node-role replica">FOLLOWER</div>
+          </div>
+          <div class="node-stats">
+            <div class="node-stat">
+              <span class="node-stat-label">HOST</span>
+              <span class="node-stat-value">localhost:8081</span>
+            </div>
+            <div class="node-stat">
+              <span class="node-stat-label">LAG</span>
+              <span class="node-stat-value" id="replica-lag">—</span>
+            </div>
+            <div class="node-stat">
+              <span class="node-stat-label">STATUS</span>
+              <span class="node-stat-value" id="replica-status" style="color:var(--blue)">STREAMING</span>
+            </div>
+          </div>
+          <div class="lag-bar">
+            <div class="lag-fill" id="lag-fill" style="width:100%"></div>
+          </div>
+        </div>
+
+      </div>
+    </div>
+  </div>
+
+  <!-- MAIN -->
+  <div class="main">
+
+    <!-- Write Console -->
+    <div class="write-console">
+      <div class="console-header">
+        <div class="dot"></div>
+        <div class="console-title">WRITE CONSOLE</div>
+      </div>
+      <div class="console-input-row">
+        <span class="console-prefix">WAL &gt;&gt;</span>
+        <input class="console-input" id="payload-input"
+               placeholder="Enter payload to append to WAL..."
+               autocomplete="off" spellcheck="false">
+        <button class="btn btn-green" onclick="appendEntry()">APPEND</button>
+      </div>
+      <div class="action-row">
+        <button class="btn btn-green" onclick="commitEntry()">COMMIT</button>
+        <button class="btn btn-red" onclick="rollbackEntry()">ROLLBACK</button>
+        <button class="btn btn-amber" onclick="checkpoint()">CHECKPOINT</button>
+        <button class="btn btn-blue" onclick="compact()">COMPACT</button>
+        <button class="btn btn-blue" onclick="loadEntries()" style="margin-left:auto">REFRESH</button>
+      </div>
+    </div>
+
+    <!-- LSN Tape -->
+    <div class="lsn-tape">
+      <div class="lsn-label">LSN TAPE</div>
+      <div class="lsn-track">
+        <div class="lsn-entries" id="lsn-tape"></div>
+      </div>
+    </div>
+
+    <!-- Log Stream -->
+    <div class="log-stream" id="log-stream">
+      <div class="log-header">
+        <span>LSN</span>
+        <span>TYPE</span>
+        <span>TERM</span>
+        <span>PAYLOAD</span>
+        <span style="text-align:right">SIZE</span>
+      </div>
+      <div class="empty-state" id="empty-state">
+        <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1">
+          <path d="M4 4h16v2H4zm0 4h16v2H4zm0 4h10v2H4zm0 4h6v2H4z"/>
+        </svg>
+        <p>NO ENTRIES — WRITE SOMETHING TO BEGIN</p>
+      </div>
+    </div>
+
+  </div>
+
+  <!-- RIGHT SIDEBAR -->
+  <div class="sidebar-right">
+
+    <div>
+      <div class="panel-label">write throughput</div>
+      <div class="chart-container">
+        <canvas id="throughput-chart"></canvas>
+      </div>
+    </div>
+
+    <div>
+      <div class="panel-label">segment map</div>
+      <div class="segment-viz" id="segment-viz">
+        <div style="font-size:10px;color:var(--text-dim)">No segments loaded</div>
+      </div>
+    </div>
+
+    <div>
+      <div class="panel-label">replication events</div>
+      <div class="replication-stream" id="rep-stream">
+        <div class="rep-event">Waiting for events...</div>
+      </div>
+    </div>
+
+    <div>
+      <div class="panel-label">quick stats</div>
+      <div style="display:flex;flex-direction:column;gap:6px">
+        <div class="node-stat">
+          <span class="node-stat-label">CHECKPOINT LSN</span>
+          <span class="node-stat-value" id="stat-checkpoint">—</span>
+        </div>
+        <div class="node-stat">
+          <span class="node-stat-label">DATA ENTRIES</span>
+          <span class="node-stat-value" id="stat-data">0</span>
+        </div>
+        <div class="node-stat">
+          <span class="node-stat-label">COMMITS</span>
+          <span class="node-stat-value" id="stat-commits">0</span>
+        </div>
+        <div class="node-stat">
+          <span class="node-stat-label">ROLLBACKS</span>
+          <span class="node-stat-value" id="stat-rollbacks">0</span>
+        </div>
+        <div class="node-stat">
+          <span class="node-stat-label">CHECKPOINTS</span>
+          <span class="node-stat-value" id="stat-checkpoints">0</span>
+        </div>
+      </div>
+    </div>
+
+  </div>
+
+  <!-- Status Bar -->
+  <div class="status-bar">
+    <div class="status-items">
+      <div class="status-item">ROLE: <span class="val">PRIMARY</span></div>
+      <div class="status-item">SEGMENT SIZE: <span class="val">64 MB</span></div>
+      <div class="status-item">GROUP COMMIT: <span class="val">5ms WINDOW</span></div>
+      <div class="status-item">FSYNC: <span class="val" id="fsync-count">0</span></div>
+    </div>
+    <div class="status-items">
+      <div class="status-item">API: <span class="val">localhost:8080</span></div>
+      <div class="status-item" id="last-op">READY</div>
+    </div>
+  </div>
+
+</div>
+
+<!-- Toast Container -->
+<div class="toast-container" id="toasts"></div>
+
+<script>
+// ── CONFIG ─────────────────────────────────────────────────────────────────
+const API = 'http://localhost:8080/api/wal';
+
+// ── STATE ──────────────────────────────────────────────────────────────────
+let entries       = [];
+let throughputHistory = new Array(30).fill(0);
+let fsyncCount    = 0;
+let lastEntryCount = 0;
+let checkpointLsn = '—';
+let connected     = false;
+
+// ── LOADING ────────────────────────────────────────────────────────────────
+window.addEventListener('load', () => {
+  setTimeout(() => {
+    document.getElementById('loading').classList.add('hidden');
+    init();
+  }, 1800);
+});
+
+function init() {
+  startClock();
+  drawThroughputChart();
+  drawMiniChart();
+  pollStatus();
+  loadEntries();
+  setInterval(pollStatus, 3000);
+  setInterval(loadEntries, 5000);
+  setInterval(updateThroughput, 1000);
+
+  document.getElementById('payload-input').addEventListener('keydown', e => {
+    if (e.key === 'Enter') appendEntry();
+  });
+}
+
+// ── CLOCK ──────────────────────────────────────────────────────────────────
+function startClock() {
+  const tick = () => {
+    document.getElementById('clock').textContent =
+      new Date().toTimeString().slice(0,8);
+  };
+  tick();
+  setInterval(tick, 1000);
+}
+
+// ── API CALLS ──────────────────────────────────────────────────────────────
+async function appendEntry() {
+  const input = document.getElementById('payload-input');
+  const text  = input.value.trim();
+  if (!text) { toast('Enter a payload first', 'error'); return; }
+
+  try {
+    const res = await fetch(`${API}/append/text`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'text/plain' },
+      body: text
+    });
+    const data = await res.json();
+    fsyncCount++;
+    document.getElementById('fsync-count').textContent = fsyncCount;
+    showFsyncFlash();
+    toast(`APPENDED · LSN ${data.lsn}`, 'success', data.lsn);
+    addReplicationEvent(`DATA written · LSN ${data.lsn} · ${text.length}B`);
+    input.value = '';
+    await loadEntries();
+    setLastOp(`APPEND LSN=${data.lsn}`);
+  } catch(e) {
+    toast('Connection failed — is primary running?', 'error');
+    setConnected(false);
+  }
+}
+
+async function commitEntry() {
+  try {
+    const res  = await fetch(`${API}/commit`, { method: 'POST' });
+    const data = await res.json();
+    toast(`COMMITTED · LSN ${data.lsn}`, 'success', data.lsn);
+    addReplicationEvent(`COMMIT · LSN ${data.lsn}`);
+    await loadEntries();
+    setLastOp(`COMMIT LSN=${data.lsn}`);
+  } catch(e) { toast('Commit failed', 'error'); }
+}
+
+async function rollbackEntry() {
+  try {
+    const res  = await fetch(`${API}/rollback`, { method: 'POST' });
+    const data = await res.json();
+    toast(`ROLLED BACK · LSN ${data.lsn}`, 'warn', data.lsn);
+    addReplicationEvent(`ROLLBACK · LSN ${data.lsn}`);
+    await loadEntries();
+    setLastOp(`ROLLBACK LSN=${data.lsn}`);
+  } catch(e) { toast('Rollback failed', 'error'); }
+}
+
+async function checkpoint() {
+  try {
+    const res  = await fetch(`${API}/checkpoint`, { method: 'POST' });
+    const data = await res.json();
+    checkpointLsn = data.checkpointLsn;
+    document.getElementById('stat-checkpoint').textContent = data.checkpointLsn;
+    toast(`CHECKPOINT · LSN ${data.checkpointLsn}`, 'warn', data.checkpointLsn);
+    addReplicationEvent(`CHECKPOINT · LSN ${data.checkpointLsn}`);
+    setLastOp(`CHECKPOINT LSN=${data.checkpointLsn}`);
+  } catch(e) { toast('Checkpoint failed', 'error'); }
+}
+
+async function compact() {
+  try {
+    const res  = await fetch(`${API}/compact?archive=true`, { method: 'POST' });
+    const data = await res.json();
+    toast(`COMPACTED ${data.segmentsCompacted} SEGMENTS`, 'warn');
+    addReplicationEvent(`COMPACTION · ${data.segmentsCompacted} segments removed`);
+    setLastOp(`COMPACT · ${data.segmentsCompacted} segments`);
+  } catch(e) { toast('Compact failed', 'error'); }
+}
+
+async function loadEntries() {
+  try {
+    const res  = await fetch(`${API}/entries`);
+    entries    = await res.json();
+    setConnected(true);
+    renderEntries();
+    updateStats();
+  } catch(e) {
+    setConnected(false);
+  }
+}
+
+async function pollStatus() {
+  try {
+    const [statusRes, lagRes] = await Promise.all([
+      fetch(`${API}/status`),
+      fetch(`${API}/replication/lag`)
+    ]);
+    const status = await statusRes.json();
+    const lag    = await lagRes.json();
+
+    document.getElementById('metric-lsn').textContent = status.currentLsn || '—';
+    document.getElementById('metric-seg-size').textContent = formatBytes(status.activeSegmentBytes || 0);
+    document.getElementById('metric-seg-count').textContent = `${status.segmentCount || 0} segments total`;
+
+    // Replication lag
+    const lagVal = Object.values(lag)[0];
+    if (lagVal !== undefined) {
+      const lagEl = document.getElementById('replica-lag');
+      lagEl.textContent = lagVal === 0 ? 'IN SYNC' : `${lagVal} entries`;
+      lagEl.style.color = lagVal === 0 ? 'var(--green)' : lagVal < 100 ? 'var(--amber)' : 'var(--red)';
+      document.getElementById('lag-fill').style.width = lagVal === 0 ? '100%' : `${Math.max(5, 100 - Math.min(lagVal, 100))}%`;
+      document.getElementById('lag-fill').style.background = lagVal === 0 ? 'var(--green)' : lagVal < 100 ? 'var(--amber)' : 'var(--red)';
+    }
+
+    renderSegments(status.segmentCount || 1, status.activeSegmentBytes || 0);
+    setConnected(true);
+  } catch(e) {
+    setConnected(false);
+    document.getElementById('primary-status').textContent = 'UNREACHABLE';
+    document.getElementById('primary-status').style.color = 'var(--red)';
+  }
+}
+
+// ── RENDER ENTRIES ─────────────────────────────────────────────────────────
+function renderEntries() {
+  const stream = document.getElementById('log-stream');
+  const empty  = document.getElementById('empty-state');
+
+  if (!entries.length) {
+    empty.style.display = 'flex';
+    return;
+  }
+  empty.style.display = 'none';
+
+  // Keep header
+  const header = stream.querySelector('.log-header');
+  stream.innerHTML = '';
+  stream.appendChild(header || createHeader());
+
+  // Render entries newest first
+  [...entries].reverse().forEach(e => {
+    const el = document.createElement('div');
+    el.className = `log-entry ${e.type}`;
+    el.innerHTML = `
+      <span class="log-lsn">${String(e.lsn).slice(-10)}</span>
+      <span class="log-type ${e.type}">${e.type}</span>
+      <span class="log-term">T${e.term}</span>
+      <span class="log-payload">${e.payload || '(empty)'}</span>
+      <span class="log-size">${e.payload ? e.payload.length + 'B' : '—'}</span>
+    `;
+    stream.appendChild(el);
+  });
+
+  // Update LSN tape
+  updateLsnTape();
+}
+
+function createHeader() {
+  const h = document.createElement('div');
+  h.className = 'log-header';
+  h.innerHTML = '<span>LSN</span><span>TYPE</span><span>TERM</span><span>PAYLOAD</span><span style="text-align:right">SIZE</span>';
+  return h;
+}
+
+function updateLsnTape() {
+  const tape = document.getElementById('lsn-tape');
+  tape.innerHTML = '';
+  const recent = entries.slice(-20);
+  recent.forEach((e, i) => {
+    const chip = document.createElement('div');
+    chip.className = `lsn-chip ${i === recent.length - 1 ? 'new' : ''}`;
+    chip.textContent = String(e.lsn).slice(-8);
+    tape.appendChild(chip);
+  });
+}
+
+function updateStats() {
+  document.getElementById('metric-entries').textContent = entries.length;
+  document.getElementById('stat-data').textContent       = entries.filter(e => e.type === 'DATA').length;
+  document.getElementById('stat-commits').textContent    = entries.filter(e => e.type === 'COMMIT').length;
+  document.getElementById('stat-rollbacks').textContent  = entries.filter(e => e.type === 'ROLLBACK').length;
+  document.getElementById('stat-checkpoints').textContent = entries.filter(e => e.type === 'CHECKPOINT').length;
+}
+
+// ── THROUGHPUT ─────────────────────────────────────────────────────────────
+function updateThroughput() {
+  const current = entries.length;
+  const delta   = Math.max(0, current - lastEntryCount);
+  lastEntryCount = current;
+
+  throughputHistory.push(delta);
+  throughputHistory.shift();
+
+  document.getElementById('metric-throughput').textContent = delta;
+  redrawCharts();
+}
+
+// ── CHARTS ─────────────────────────────────────────────────────────────────
+let mainCtx, miniCtx;
+
+function drawThroughputChart() {
+  const canvas = document.getElementById('throughput-chart');
+  mainCtx = canvas.getContext('2d');
+  canvas.width  = canvas.offsetWidth * window.devicePixelRatio || 280;
+  canvas.height = 100 * window.devicePixelRatio || 100;
+  redrawCharts();
+}
+
+function drawMiniChart() {
+  const canvas = document.getElementById('throughput-mini');
+  miniCtx = canvas.getContext('2d');
+  canvas.width  = canvas.offsetWidth * window.devicePixelRatio || 240;
+  canvas.height = 40 * window.devicePixelRatio || 40;
+}
+
+function redrawCharts() {
+  drawChart(mainCtx, 280, 100, throughputHistory, '#00ff88', 2);
+  if (miniCtx) drawChart(miniCtx, 240, 40, throughputHistory, '#00ff88', 1);
+}
+
+function drawChart(ctx, w, h, data, color, lineWidth) {
+  if (!ctx) return;
+  ctx.clearRect(0, 0, w * 2, h * 2);
+
+  const max = Math.max(...data, 1);
+  const step = w / (data.length - 1);
+
+  // Grid lines
+  ctx.strokeStyle = 'rgba(0,255,136,0.06)';
+  ctx.lineWidth = 1;
+  for (let i = 0; i <= 4; i++) {
+    const y = (h / 4) * i;
+    ctx.beginPath();
+    ctx.moveTo(0, y); ctx.lineTo(w, y);
+    ctx.stroke();
+  }
+
+  // Area fill
+  ctx.beginPath();
+  ctx.moveTo(0, h);
+  data.forEach((v, i) => {
+    ctx.lineTo(i * step, h - (v / max) * (h - 8));
+  });
+  ctx.lineTo(w, h);
+  ctx.closePath();
+  ctx.fillStyle = 'rgba(0,255,136,0.08)';
+  ctx.fill();
+
+  // Line
+  ctx.beginPath();
+  ctx.strokeStyle = color;
+  ctx.lineWidth   = lineWidth;
+  ctx.shadowColor = color;
+  ctx.shadowBlur  = 8;
+  data.forEach((v, i) => {
+    const x = i * step;
+    const y = h - (v / max) * (h - 8);
+    i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
+  });
+  ctx.stroke();
+  ctx.shadowBlur = 0;
+}
+
+// ── SEGMENTS ───────────────────────────────────────────────────────────────
+function renderSegments(count, activeSize) {
+  const viz = document.getElementById('segment-viz');
+  viz.innerHTML = '';
+  const segSize = 64 * 1024 * 1024;
+
+  for (let i = 0; i < Math.min(count, 5); i++) {
+    const isActive = i === count - 1;
+    const fillPct  = isActive ? (activeSize / segSize) * 100 : 100;
+    const bar = document.createElement('div');
+    bar.className = 'segment-bar';
+    bar.innerHTML = `
+      <div class="segment-name">seg-${String(i).padStart(3,'0')}</div>
+      <div class="segment-track">
+        <div class="segment-fill ${isActive ? 'active' : ''}" style="width:${Math.max(2, fillPct)}%"></div>
+      </div>
+      <div class="segment-pct">${Math.round(fillPct)}%</div>
+    `;
+    viz.appendChild(bar);
+  }
+}
+
+// ── REPLICATION EVENTS ─────────────────────────────────────────────────────
+function addReplicationEvent(msg) {
+  const stream = document.getElementById('rep-stream');
+  const el = document.createElement('div');
+  el.className = 'rep-event';
+  const time = new Date().toTimeString().slice(0,8);
+  el.innerHTML = `<span>${time}</span> ${msg}`;
+  if (stream.querySelector('.rep-event')?.textContent === 'Waiting for events...') {
+    stream.innerHTML = '';
+  }
+  stream.insertBefore(el, stream.firstChild);
+  if (stream.children.length > 20) stream.lastChild.remove();
+}
+
+// ── TOAST ──────────────────────────────────────────────────────────────────
+function toast(msg, type = 'success', lsn = null) {
+  const container = document.getElementById('toasts');
+  const el = document.createElement('div');
+  el.className = `toast ${type === 'error' ? 'error' : type === 'warn' ? 'warn' : ''}`;
+  el.innerHTML = `
+    <div class="dot ${type === 'error' ? 'red' : type === 'warn' ? 'amber' : ''}"></div>
+    <span>${msg}</span>
+    ${lsn ? `<span class="toast-lsn">LSN:${String(lsn).slice(-8)}</span>` : ''}
+  `;
+  container.appendChild(el);
+  setTimeout(() => el.remove(), 3200);
+}
+
+// ── FSYNC FLASH ────────────────────────────────────────────────────────────
+function showFsyncFlash() {
+  const el = document.createElement('div');
+  el.className = 'fsync-flash';
+  document.body.appendChild(el);
+  setTimeout(() => el.remove(), 500);
+}
+
+// ── CONNECTION ─────────────────────────────────────────────────────────────
+function setConnected(val) {
+  connected = val;
+  const dot   = document.getElementById('conn-dot');
+  const label = document.getElementById('conn-label');
+  if (val) {
+    dot.className = 'dot';
+    label.textContent = 'CONNECTED';
+  } else {
+    dot.className = 'dot red';
+    label.textContent = 'DISCONNECTED';
+  }
+}
+
+function setLastOp(op) {
+  document.getElementById('last-op').textContent = `LAST OP: ${op}`;
+}
+
+// ── UTILS ──────────────────────────────────────────────────────────────────
+function formatBytes(b) {
+  if (b < 1024)           return `${b} B`;
+  if (b < 1024 * 1024)    return `${(b/1024).toFixed(1)} KB`;
+  return `${(b/1024/1024).toFixed(2)} MB`;
+}
+</script>
+</body>
+</html>
